@@ -1,9 +1,9 @@
-1.
-2.
-3.
-4.
-5.
-6.
-7.
-8.
-9.
+1. set args <arg1> <arg2> ...   (e.g. `set args foo bar`; `show args` displays the current arguments. `run foo bar` also passes arguments for that run.)
+2. break <location>   (e.g. `break main`, `break hello.c:10`, `break my_function`; short form `b`)
+3. next   (short `n`; executes the next line, stepping over function calls)
+4. step   (short `s`; steps into the function called on the next line)
+5. continue   (short `c`; resumes execution until the next breakpoint or the program exits)
+6. print <expression>   (short `p`; e.g. `print x`, `print 1+2`, `print/x x` prints in hex)
+7. display <expression>   (e.g. `display x`; gdb prints its value every time execution stops. `info display` lists displays, `undisplay <num>` removes one)
+8. info locals   (lists all local variables in the current function and their values; `info args` lists the function's parameters)
+9. quit   (short `q`; gdb asks for confirmation if a process is still running)
