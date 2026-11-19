@@ -1,0 +1,120 @@
+FIXME 1：simple_fn（cc_test.s:55）
+问：Venus 报的错是什么？为什么会错？
+答：原代码是
+        simple_fn:
+            mv a0, t0
+            li a0, 1
+            ret
+    main 在调用 simple_fn 之前只给 s0、s1、s11 赋了值，从没给 t0 赋过值。
+    因此 `mv a0, t0` 读的是一个"未初始化寄存器"，Venus 报：
+        [CC Violation] Usage of unset register t0!
+    （虽然紧接着 `li a0, 1` 又把 a0 改回 1，返回值没受影响，但读取未初始化
+    寄存器本身仍然违规。）修复方法就是删掉这一行；当前 simple_fn 只剩
+        li a0, 1
+        ret
+    。
+
+FIXME 2：naive_pow（cc_test.s:73）
+问：这个函数的 CC 错误是什么？
+答：naive_pow 把 s0 当作局部变量（累乘结果）使用，却没有保存/恢复它。
+    s0 是 callee-saved 寄存器，函数返回时必须保持调用者原来的值。
+    Venus 报：
+        Setting of a saved register (s0) which has not been saved!
+        Save register s0 not correctly restored before return!
+    修复（已做）：在 BEGIN PROLOGUE / END PROLOGUE 之间加
+        addi sp, sp, -4
+        sw s0, 0(sp)
+    在 END EPILOGUE 前加
+        lw s0, 0(sp)
+        addi sp, sp, 4
+    提示里说"想想 s0 里的 s 代表什么"——s 代表 saved，正是 callee-saved。
+
+FIXME 3：inc_arr 的 prologue（cc_test.s:104）
+问：还需要保存哪些寄存器？
+答：还需要保存 s0 和 s1。
+    - s0 存数组起始地址（mv s0, a0），s1 存数组长度（mv s1, a1），
+      两者都是 callee-saved，函数返回前必须恢复。
+    - ra 原本就已经保存了，这一条也是必须的（原因见下面 Q3）。
+    当前 prologue 是：
+        addi sp, sp, -16
+        sw s0, 12(sp)
+        sw s1, 8(sp)
+        sw ra, 4(sp)
+        # 0(sp) 留给 t0 在调用 helper_fn 时使用
+    epilogue 必须与 prologue 严格对称：
+        lw ra, 4(sp)
+        lw s1, 8(sp)
+        lw s0, 12(sp)
+        addi sp, sp, 16
+
+FIXME 4：调用 helper_fn 前保存 t0（cc_test.s:120）
+问：为什么要保存 t0？为什么 t1 不用保存？
+答：t0 是循环计数器 k（inc_arr 中 `li t0, 0`，每轮 `addi t0, t0, 1`）。
+    它在 jal helper_fn 之后还要使用，属于"跨调用仍然活着"（live across call）
+    的值。t0 是 caller-saved（临时）寄存器，按调用约定，被调函数可以随意
+    改写 t 系列寄存器；因此调用者必须自己保存。做法是在调用前
+        sw t0, 0(sp)
+        jal helper_fn
+        lw t0, 0(sp)
+    t1 不用保存，是因为 t1 不是跨调用活着的值：每一轮循环开头都会用
+        slli t1, t0, 2
+    重新计算它，算完马上用来求 a0；调用返回后不会再读 t1。被调函数把它
+    改掉也无所谓，下一轮会重新算。
+
+FIXME 5：helper_fn（cc_test.s:143）
+问：这个函数哪里违反调用约定？
+答：它用 s0 当临时变量（`addi s0, t1, 1` / `sw s0, 0(a0)`），却没有保存
+    s0，违反 callee-saved 约定。而且更有害的是：调用者 inc_arr 的 s0 里
+    保存着数组基地址，helper_fn 一改，inc_arr 下一轮就会拿错误的地址去
+    访问内存，直接跑飞。
+    修复（已做）：加
+        addi sp, sp, -4
+        sw s0, 0(sp)
+    ...
+        lw s0, 0(sp)
+        addi sp, sp, 4
+
+------------------------------------------------------------------------
+Exercise 4 的四个 Action Item 问题
+------------------------------------------------------------------------
+
+Q1. simple_fn、naive_pow、inc_arr 被 CC checker 报错的原因分别是什么？
+答：
+  simple_fn —— `mv a0, t0` 读取了从未赋值的 t0（Usage of unset register）。
+  naive_pow —— 改写 callee-saved 的 s0，却没有在 prologue 保存、
+               epilogue 恢复（Setting of a saved register ... / Save register
+               s0 not correctly restored）。
+  inc_arr   —— 同样改写了 s0、s1 却没有保存；此外它调用 helper_fn 会覆盖
+               ra，所以 ra 也必须保存。原 epilogue 与 prologue 不对称，
+               还会报 sp/s0/s1 not correctly restored。
+
+Q2. RISC-V 里函数调用就是跳到目标地址并把返回地址存进 ra。
+    naive_pow_loop / naive_pow_end 这些跳转也受调用约定约束吗？
+答：不受。`j naive_pow_loop`、`jal x0, naive_pow_loop`（j 就是 jal x0）
+    是函数内部的控制流跳转，不写 ra、不产生新的函数调用栈帧，也不涉及
+    "被调函数要保存 s 寄存器"的义务。调用约定只在"真正的函数调用"
+    （jal/jalr 且把返回地址写进 ra）里约束调用者和被调者。
+    换句话说，naive_pow_loop 不是一个独立函数，只是 naive_pow 内部的
+    一个代码标签。
+
+Q3. 为什么只有 inc_arr 需要保存 ra，其它函数不用？
+答：ra 在函数被调用时保存着"返回调用者的地址"。只要函数自己不执行
+    jal/jalr 去调用别的函数，ra 就不会被改写，返回时直接 jr ra 即可。
+    simple_fn、naive_pow、helper_fn 都是 leaf function（叶子函数，不再
+    调用别人），所以不用保存 ra。
+    inc_arr 里执行了 `jal helper_fn`，这条指令会把 ra 覆盖成"helper_fn
+    返回后 inc_arr 的继续执行地址"；为了 helper_fn 返回后还能再返回到
+    inc_arr 的调用者，inc_arr 必须先把原来的 ra 存到栈上，返回前恢复。
+    （main 调用别的函数，main 也保存了 ra。）
+
+Q4. 为什么 helper_fn 的调用约定错误没有被 Venus CC checker 报出来？
+答：Venus 的 CC checker 只检查用 .globl 导出的函数。文件开头是
+        .globl simple_fn naive_pow inc_arr
+    helper_fn 不在 .globl 列表里，所以 checker 不把它当作一个需要检查的
+    函数入口，它内部对 s0 的写入就被漏掉了（Lab handout 的 Note 里也
+    明确说了这一点）。
+    实测验证：
+      - inc_arr 修好、helper_fn 仍不保存 s0 时，-cc 不报 helper_fn；
+      - 把 helper_fn 加进 .globl 再跑，Venus 立刻在 `addi s0, t1, 1`
+        处报 "Setting of a saved register (s0) which has not been saved!"。
+    这也说明 CC checker 只是运行时的不完备检查，不能代替人工审查。

@@ -1,0 +1,113 @@
+========================================================================
+Lab 03 - Exercise 2 参考答案（基于 Venus 模拟器实测）
+C 源码：ex2.c    汇编：ex2.s
+========================================================================
+
+C 代码回顾：
+    int source[] = {3, 1, 4, 1, 5, 9, 0};
+    int dest[10];
+    int fun(int x) { return -x * (x + 1); }
+    int main() {
+        int k;
+        int sum = 0;
+        for (k = 0; source[k] != 0; k++) {
+            dest[k] = fun(source[k]);
+            sum += dest[k];
+        }
+        return sum;
+    }
+
+Q1. The register representing the variable k.
+------------------------------------------------------------------------
+答：k 用寄存器 t0（x5）表示。
+
+  ex2.s 第 40 行：addi t0, x0, 0    # k = 0（初始化）
+  ex2.s 第 61 行：addi t0, t0, 1    # k++（循环末尾自增）
+  第 45 行 slli s3, t0, 2 也用 t0 计算下标偏移。
+
+  为什么循环里还要 sw/lw t0？因为 t0 是 caller-saved 寄存器，调用 fun 时
+  可能被 fun 改写，所以在 jal fun 之前把它保存到栈上（第 51 行），
+  返回后再恢复（第 54 行）。
+
+Q2. The register representing the variable sum.
+------------------------------------------------------------------------
+答：sum 用寄存器 s0（x8）表示。
+
+  ex2.s 第 41 行：addi s0, x0, 0    # sum = 0（初始化）
+  ex2.s 第 60 行：add s0, s0, t2    # sum += dest[k]
+  ex2.s 第 64 行：add a0, x0, s0    # return sum（放入 a0 作为返回值）
+
+  s0 是 callee-saved（saved）寄存器，fun 不会破坏它，所以循环中不需要
+  像 t0 那样在调用前后保存/恢复。函数开头的 prologue 保存 s0-s3 是
+  为了遵守调用约定、不破坏调用者的值。
+
+Q3. The registers acting as pointers to the source and dest arrays.
+------------------------------------------------------------------------
+答：
+  source 的指针：s1（x9）
+      ex2.s 第 42 行：la s1, source
+      实测值：s1 = 0x10000000（source 数组的起始地址）
+
+  dest 的指针：s2（x18）
+      ex2.s 第 43 行：la s2, dest
+      实测值：s2 = 0x1000001C
+      （source 有 7 个 word = 28 字节，0x10000000 + 0x1C = 0x1000001C，
+        正好是 dest 的起始地址）
+
+  la（load address）伪指令把标签的地址装入寄存器，得到的就是数组首地址，
+  相当于 C 里的数组名/指针。
+
+Q4. The assembly code for the loop found in the C code.
+------------------------------------------------------------------------
+答：循环对应 ex2.s 第 44 行 loop: 到第 62 行 jal x0, loop：
+
+  loop:
+      slli s3, t0, 2        # s3 = k * 4（字节偏移；每个 int 4 字节）
+      add  t1, s1, s3       # t1 = &source[k] = source + k*4
+      lw   t2, 0(t1)        # t2 = source[k]
+      beq  t2, x0, exit     # 循环条件：if (source[k] == 0) 跳出循环
+      add  a0, x0, t2       # 准备参数：x = source[k]（a0 = 参数）
+      addi sp, sp, -8       # 调用前保存 caller-saved 寄存器
+      sw   t0, 0(sp)        # 保存 k
+      sw   t2, 4(sp)        # 保存 source[k]
+      jal  fun              # 调用 fun，返回值在 a0 中
+      lw   t0, 0(sp)        # 恢复 k
+      lw   t2, 4(sp)        # 恢复 source[k]
+      addi sp, sp, 8        # 恢复栈指针
+      add  t2, x0, a0       # t2 = fun 的返回值
+      add  t3, s2, s3       # t3 = &dest[k] = dest + k*4
+      sw   t2, 0(t3)        # dest[k] = fun(source[k])
+      add  s0, s0, t2       # sum += dest[k]
+      addi t0, t0, 1        # k++
+      jal  x0, loop         # 无条件跳回循环开头（相当于 j loop）
+
+  exit:
+
+  说明：
+   - C 的循环条件是 source[k] != 0，因此先 lw 取出 source[k]，再用
+     beq 判断；等于 0 就跳到 exit，否则执行循环体。
+   - jal fun 会用 ra 记录返回地址，函数体最后 jr ra 返回。
+   - jal x0, loop 与 j loop 等价：rd = x0 表示不需要保存返回地址。
+   - 循环体里对 k 的更新（k++）在循环末尾第 61 行。
+
+Q5. How the pointers are manipulated in the assembly code.
+------------------------------------------------------------------------
+答：
+  s1 和 s2 始终指向两个数组的首地址，本身**不被修改**（base pointer）。
+  每次迭代都根据 k 重新计算字节偏移，再加到基地址上：
+
+      slli s3, t0, 2      # 偏移 = k * 4（因为 int 占 4 字节）
+      add  t1, s1, s3     # 源数组元素地址 = source 基址 + 偏移
+      add  t3, s2, s3     # 目标数组元素地址 = dest 基址 + 偏移
+
+  然后：
+      lw t2, 0(t1)        # 用偏移后的地址读 source[k]
+      sw t2, 0(t3)        # 用偏移后的地址写 dest[k]
+
+  即 C 中的 source[k]、dest[k] 被编译成
+      “基地址 + k*4”的地址计算 + lw/sw，
+  这正是数组下标（pointer arithmetic）在汇编层面的实现。
+
+  注意这里不是“每次给指针加 4”的写法（那种写法是 s1 += 4、s2 += 4），
+  而是保留基址、每次重算偏移。好处是同一个偏移 s3 可以同时用于
+  source 和 dest 两个数组。

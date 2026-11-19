@@ -8,8 +8,11 @@ int fun(int x) {
 int main() {
     int k;
     int sum = 0;
+    int tmp; // a0
     for (k = 0; source[k] != 0; k++) {
-        dest[k] = fun(source[k]);
+        tmp = source[k];
+        tmp = fun(tmp);
+        dest[k] = tmp;
         sum += dest[k];
     }
     return sum;
